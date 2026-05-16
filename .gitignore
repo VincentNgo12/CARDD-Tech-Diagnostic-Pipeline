@@ -1,0 +1,22 @@
+# Data and heavy storage
+data/
+*.csv
+*.json
+*.parquet
+*.pdf
+*.png
+
+# Python environment artifacts
+__pycache__/
+*.pyc
+*.pyo
+*.pyd
+.Python
+env/
+venv/
+.env
+
+# IDE / Editor configuration
+.vscode/
+.idea/
+.ipynb_checkpoints/
