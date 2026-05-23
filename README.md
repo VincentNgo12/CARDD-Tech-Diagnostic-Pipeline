@@ -49,3 +49,23 @@ cardd-tech-diagnostic-pipeline/
 ├── .gitignore               # Security and environment exclusions
 ├── README.md                # Project documentation
 └── requirements.txt         # Dependency management
+
+
+## ⚙️ Environment Setup & Replication
+
+This project requires **Python 3.10** and uses a hybrid **Conda + Pip** environment management strategy to ensure binary compatibility across different operating systems (Windows, WSL2, Linux, MacOS).
+
+Follow these steps to replicate the exact development environment on your local machine:
+
+### 1. Prerequisites
+Ensure you have **Miniconda** or **Anaconda** installed. If you are using Windows with WSL2, it is highly recommended to install Miniconda natively inside your Linux terminal distribution rather than using the Windows GUI client.
+
+### 2. Create the Isolated Sandbox
+Navigate to the project root directory and run the following commands to initialize a clean Python 3.10 virtual environment:
+
+```bash
+# Create the environment framework
+conda create --name cardd-pipeline python=3.10 -y
+
+# Activate the sandbox
+conda activate cardd-pipeline
