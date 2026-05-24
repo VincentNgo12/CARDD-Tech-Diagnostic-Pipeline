@@ -28,7 +28,7 @@ class MotorDataLoader(BaseDataLoader):
     def __init__(
         self, 
         data_path: str, 
-        sensor_cols: List[str] = ["I1", "I2", "I3", "V1", "V2", "V3"],
+        sensor_cols: List[str] = ["Va", "Vb", "Vc", "Ia", "Ib", "Ic"],
         label_col: str = "label"
     ) -> None:
         """
