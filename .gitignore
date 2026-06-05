@@ -20,3 +20,9 @@ venv/
 .vscode/
 .idea/
 .ipynb_checkpoints/
+
+# Ignore LBNL datasets and TISEAN temporary results
+data/LBNL_FDD_Dataset_FCU/
+tisean_results_lbnl/
+run_tisean_lbnl.py
+Tisean_3.0.1/
