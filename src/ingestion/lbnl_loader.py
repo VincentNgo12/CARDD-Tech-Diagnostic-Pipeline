@@ -87,30 +87,40 @@ class LBNLLoader(BaseDataLoader):
             summary = json.load(f)
         
         # Extract discovered optimal delay (d) and embedding dimension (m)
-        d_vals = summary["d_optimal"]
-        m_vals = summary["m_optimal"]
+        param_map = summary["parameters"]
         
-        # Calculate individual lookback windows and the global 'Max Lookback'
-        # Lookback = (m - 1) * d
-        lookbacks = [(m - 1) * d for m, d in zip(m_vals, d_vals)]
+        # 1. Parse parameters and calculate lookbacks dynamically using dataframe column names
+        lookbacks = []
+        m_dimensions = []
+        d_delays = []
+        
+        for col in self.df.columns:
+            if col not in param_map:
+                raise KeyError(f"Feature '{col}' found in data loader but missing from summary.json configuration.")
+            
+            d = param_map[col]["d_delay"]
+            m = param_map[col]["m_dimension"]
+            
+            d_delays.append(d)
+            m_dimensions.append(m)
+            lookbacks.append((m - 1) * d)
+            
         max_lookback = int(max(lookbacks))
         
         data = self.df.values
         N, num_features = data.shape
         
-        # Total number of samples in the reconstructed phase-space
         num_samples = N - max_lookback
-        total_cols = sum(m_vals)
+        total_cols = sum(m_dimensions)
         
-        # Pre-allocate embedding matrix
+        # Pre-allocate feature frame
         X = np.zeros((num_samples, total_cols), dtype=np.float64)
         
-        # Construct the multivariate phase-space embedding matrix using 
-        # a high-performance vectorized NumPy slicing loop.
+        # 2. Reconstruct multivariate phase-space safely mapped by feature name
         col_offset = 0
-        for i in range(num_features):
-            m = m_vals[i]
-            d = d_vals[i]
+        for i, col in enumerate(self.df.columns):
+            m = m_dimensions[i]
+            d = d_delays[i]
             
             # For each index t from max_lookback to N, horizontally stack 
             # the history vectors: [x_i(t), x_i(t - d_i), x_i(t - 2*d_i), ...]
