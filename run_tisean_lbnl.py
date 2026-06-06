@@ -180,8 +180,12 @@ def run_mutual_info(
     
     d_opt = int(delays[-1])  # Default to last if no minimum found
     for i in range(1, len(mi_smoothed) - 1):
-        # Look for local valley in smoothed signal
+        # Check if it's a true local valley
         if mi_smoothed[i] < mi_smoothed[i - 1] and mi_smoothed[i] < mi_smoothed[i + 1]:
+            # Ignore high-frequency noise spikes below a 20-minute horizon
+            if delays[i] < 20:
+                continue
+
             d_opt = int(delays[i])
             break
             
@@ -215,9 +219,10 @@ def run_fnn(
     fnn_out = os.path.join(results_dir, f"{tag}_fnn.txt")
 
     # Use specified max rows to avoid excessive computation
+    # *** UPDATE: inluded -t flag: Theiler window, minimal temporal separation of neighbours
     np.savetxt(fnn_in, sensor_data[:max_rows], fmt="%.8f")
     result = subprocess.run(
-        [FNN_EXE, "-d", str(d_opt), "-M", f"1,{MAX_EMB_DIM}", fnn_in, "-o", fnn_out],
+        [FNN_EXE, "-d", str(d_opt), "-t", str(d_opt), "-M", f"1,{MAX_EMB_DIM}", fnn_in, "-o", fnn_out],
         capture_output=True,
     )
     if os.path.exists(fnn_in):
