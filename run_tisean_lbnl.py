@@ -246,10 +246,27 @@ def run_fnn(
     fnn_frac = fnn_data[:, 1]
 
     m_opt = int(dims[-1])
+    
+    # Define a tolerance threshold for change between dimensions (1% slope)
+    PLATEAU_TOLERANCE = 0.01 
+
     for i in range(len(fnn_frac)):
+        # Strategy A: Check if it successfully cleared the baseline threshold
         if fnn_frac[i] < FNN_THRESHOLD:
             m_opt = int(dims[i])
             break
+            
+        # Strategy B: Dynamic Plateau Detection (Catching the Noise Floor Elbow)
+        if i > 0:
+            delta_improvement = fnn_frac[i-1] - fnn_frac[i]
+            
+            # If increasing the dimension yields basically zero improvement, we've hit the floor
+            if abs(delta_improvement) < PLATEAU_TOLERANCE:
+                print(f"  [DYNAMIC] FNN curve plateaued at {fnn_frac[i-1]:.3f} -> {fnn_frac[i]:.3f}. "
+                      f"Locking optimal dimension at m={dims[i-1]}.")
+                m_opt = int(dims[i-1])
+                break
+                
     return m_opt
 
 
