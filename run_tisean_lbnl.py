@@ -31,7 +31,6 @@ FNN_EXE = os.path.abspath(os.path.join(_TISEAN_DIR, "false_nearest"))
 
 DEFAULT_MAX_DELAY = 50
 MAX_EMB_DIM = 20
-FNN_THRESHOLD = 0.10       # fraction of false neighbors considered "good enough"
 DEFAULT_MAX_ROWS = 200_000 # cap rows fed to TISEAN FNN 
 
 
@@ -89,6 +88,42 @@ def plot_mi_curve(
     plt.close()
 
 
+def plot_fnn_sweep(
+    dims: np.ndarray, 
+    fnn_results: dict, 
+    m_opt: int, 
+    tag: str, 
+    plots_dir: str
+) -> None:
+    """
+    Plots the FNN curves for multiple ratio factors (f) to visualize the invariant elbow.
+    """
+    plt.figure(figsize=(10, 6))
+    
+    colors = {2.0: '#e74c3c', 5.0: '#f39c12', 10.0: '#3498db', 15.0: '#2ecc71'}
+    
+    for f_val, fractions in fnn_results.items():
+        plt.plot(dims, fractions, marker='o', markersize=4, linewidth=2, 
+                 color=colors.get(f_val, 'gray'), label=f'Ratio (f) = {f_val}')
+        
+    # Mark the automatically detected elbow
+    plt.axvline(x=m_opt, color='black', linestyle='--', linewidth=2, 
+                label=f'Auto-Detected Elbow (m={m_opt})')
+    
+    plt.title(f'False Nearest Neighbors: Noise Floor Sweep - {tag}', fontsize=14)
+    plt.xlabel('Embedding Dimension (m)', fontsize=12)
+    plt.ylabel('Fraction of False Neighbors', fontsize=12)
+    plt.xticks(dims)
+    plt.ylim(-0.05, 1.05)
+    plt.legend()
+    plt.grid(True, linestyle='--', alpha=0.6)
+    
+    plot_filename = os.path.join(plots_dir, f"{tag}_fnn_sweep.png")
+    plt.tight_layout()
+    plt.savefig(plot_filename, dpi=150)
+    plt.close()
+
+
 # ── Data Loader ──────────────────────────────────────────────────────
 
 def load_lbnl_train_data(data_dir: str) -> Tuple[np.ndarray, List[str]]:
@@ -111,14 +146,17 @@ def load_lbnl_train_data(data_dir: str) -> Tuple[np.ndarray, List[str]]:
     
     df = pd.read_csv(fault_free_path)
     
-    # Aggressively drop metadata, static setpoints, binary indicators, and step actuators
+    # Drop metadata, static setpoints, binary indicators, and step actuators
     cols_to_drop = [
         "Datetime", "FCU_CTRL", "FAN_CTRL",                      # Metadata / Categorical
         "RMCLGSPT", "RMHTGSPT",                                  # Static State Setpoints
         "FCU_CVLV", "FCU_CVLV_DM", "FCU_HVLV", "FCU_HVLV_DM",    # Binary/Discrete Step Valves
         "FCU_CLG_GPM", "FCU_HTG_GPM",                            # Resulting Square-wave Flow Rates
-        "FCU_DMPR", "FCU_DMPR_DM", "FCU_SPD", "FCU_WAT"          # Actuators and Fan Speed States
+        "FCU_DMPR", "FCU_DMPR_DM", "FCU_SPD", "FCU_WAT",         # Actuators and Fan Speed States
+        "FCU_OA_CFM", "FCU_DA_CFM",
+        "FCU_CLG_EWT", "FCU_HTG_EWT"
     ]
+
     df = df.drop(columns=[c for c in cols_to_drop if c in df.columns])
     
     feature_cols = df.columns.tolist()
@@ -199,8 +237,11 @@ def run_fnn(
     sensor_data: np.ndarray, 
     d_opt: int, 
     results_dir: str, 
+    plots_dir: str,
     tag: str, 
-    max_rows: int
+    max_rows: int,
+    max_emb_dim: int = MAX_EMB_DIM,
+    no_f_sweep: bool = False
 ) -> int:
     """
     Run FNN on one sensor with given delay d, return optimal embedding dim m.
@@ -216,59 +257,76 @@ def run_fnn(
         The optimal embedding dimension m_opt.
     """
     fnn_in = os.path.join(results_dir, f"{tag}_fnn_input.txt")
-    fnn_out = os.path.join(results_dir, f"{tag}_fnn.txt")
-
-    # Use specified max rows to avoid excessive computation
-    # *** UPDATE: inluded -t flag: Theiler window, minimal temporal separation of neighbours
     np.savetxt(fnn_in, sensor_data[:max_rows], fmt="%.8f")
-    result = subprocess.run(
-        [FNN_EXE, "-d", str(d_opt), "-t", str(d_opt), "-M", f"1,{MAX_EMB_DIM}", fnn_in, "-o", fnn_out],
-        capture_output=True,
-    )
+    
+    fnn_results = {}
+    dims = None
+    
+    # ── 1. EXECUTE FNN (Sweep vs. Default) ──
+    if no_f_sweep:
+        print("  Running single FNN with TISEAN default ratio...", flush=True)
+        fnn_out = os.path.join(results_dir, f"{tag}_fnn_default.txt")
+        
+        # Notice: No "-f" argument in this subprocess array
+        result = subprocess.run(
+            [FNN_EXE, "-d", str(d_opt), "-M", f"1,{max_emb_dim}", fnn_in, "-o", fnn_out],
+            capture_output=True,
+        )
+        
+        if result.returncode == 0 and os.path.exists(fnn_out):
+            try:
+                data = np.loadtxt(fnn_out)
+                if data.ndim == 1: data = data.reshape(1, -1)
+                dims = data[:, 0].astype(int)
+                fnn_results["Default"] = data[:, 1]
+            except Exception as e:
+                print(f"  WARNING: Could not parse default output for {tag}: {e}")
+    else:
+        f_sweep = [2.0, 3.0, 4.0, 5.0, 10.0]
+        for f_val in f_sweep:
+            fnn_out = os.path.join(results_dir, f"{tag}_fnn_f{f_val}.txt")
+            
+            # Notice: Contains the "-f" argument
+            result = subprocess.run(
+                [FNN_EXE, "-d", str(d_opt), "-M", f"1,{max_emb_dim}", "-f", str(f_val), fnn_in, "-o", fnn_out],
+                capture_output=True,
+            )
+            
+            if result.returncode == 0 and os.path.exists(fnn_out):
+                try:
+                    data = np.loadtxt(fnn_out)
+                    if data.ndim == 1: data = data.reshape(1, -1)
+                    if dims is None: dims = data[:, 0].astype(int)
+                    fnn_results[f_val] = data[:, 1]
+                except Exception as e:
+                    print(f"  WARNING: Could not parse f={f_val} output for {tag}: {e}")
+                
     if os.path.exists(fnn_in):
         os.remove(fnn_in)
-        
-    if result.returncode != 0:
-        print(f"  WARNING: FNN failed (exit {result.returncode}) for {tag}, "
-              "falling back to m=6", flush=True)
+
+    if not fnn_results:
+        print(f"  [ERROR] All FNN executions failed for {tag}. Fallback m=6.")
         return 6
 
-    try:
-        fnn_data = np.loadtxt(fnn_out)
-    except Exception as e:
-        print(f"  WARNING: Failed to load FNN results for {tag}: {e}. Falling back to m=6.")
-        return 6
-
-    if fnn_data.ndim == 1:
-        fnn_data = fnn_data.reshape(1, -1)
-        
-    dims = fnn_data[:, 0].astype(int)
-    fnn_frac = fnn_data[:, 1]
-
+    # ── 2. AUTOMATED ELBOW DETECTION ──
+    # If sweeping, use f=2.0 as baseline. If default, just use the only curve we have.
+    target_curve = fnn_results.get(2.0, list(fnn_results.values())[-1])
     m_opt = int(dims[-1])
     
-    # Define a tolerance threshold for change between dimensions (1% slope)
-    PLATEAU_TOLERANCE = 0.01 
+    for i in range(1, len(target_curve)):
+        delta = target_curve[i-1] - target_curve[i]
+        if delta < 0.015:
+            if i + 1 < len(target_curve):
+                next_delta = target_curve[i] - target_curve[i+1]
+                if next_delta < 0.015:
+                    m_opt = int(dims[i-1])
+                    print(f"  [AUTO] Invariant elbow locked at m={m_opt}")
+                    break
 
-    for i in range(len(fnn_frac)):
-        # Strategy A: Check if it successfully cleared the baseline threshold
-        if fnn_frac[i] < FNN_THRESHOLD:
-            m_opt = int(dims[i])
-            break
-            
-        # Strategy B: Dynamic Plateau Detection (Catching the Noise Floor Elbow)
-        if i > 0:
-            delta_improvement = fnn_frac[i-1] - fnn_frac[i]
-            
-            # If increasing the dimension yields basically zero improvement, we've hit the floor
-            if abs(delta_improvement) < PLATEAU_TOLERANCE:
-                print(f"  [DYNAMIC] FNN curve plateaued at {fnn_frac[i-1]:.3f} -> {fnn_frac[i]:.3f}. "
-                      f"Locking optimal dimension at m={dims[i-1]}.")
-                m_opt = int(dims[i-1])
-                break
-                
+    # ── 3. VISUAL PROOF ──
+    plot_fnn_sweep(dims, fnn_results, m_opt, tag, plots_dir)
+    
     return m_opt
-
 
 # ── Main ──────────────────────────────────────────────────────────────────────
 
@@ -286,16 +344,22 @@ def parse_args():
                    help=f"Override default row limit (default: {DEFAULT_MAX_ROWS})")
     p.add_argument("--max-delay", type=int, default=DEFAULT_MAX_DELAY,
                    help=f"Override Mutual Information search window (default: {DEFAULT_MAX_DELAY})")
+    p.add_argument("--max-emb-dim", type=int, default=10,
+                   help="Maximum embedding dimension to search (default: 10)")
+    p.add_argument("--no-f-sweep", action="store_true",
+                   help="Disable the -f ratio sweep and use TISEAN's native default ratio (f=2.0).")
     return p.parse_args()
 
 
 def main():
     args = parse_args()
     results_dir = args.results_dir
-    plots_dir = os.path.join(results_dir, "plots")
+    plots_mi_dir = os.path.join(results_dir, "plots_MI")
+    plots_fnn_dir = os.path.join(results_dir, "plots_FNN")
     
     os.makedirs(results_dir, exist_ok=True)
-    os.makedirs(plots_dir, exist_ok=True)
+    os.makedirs(plots_mi_dir, exist_ok=True)
+    os.makedirs(plots_fnn_dir, exist_ok=True)
 
     # Verify TISEAN binaries
     for exe in (MUTUAL_EXE, FNN_EXE):
@@ -307,7 +371,6 @@ def main():
 
     print(f"=== TISEAN parameter discovery: LBNL DATASET (Refactored) ===", flush=True)
     print(f"Results → {results_dir}", flush=True)
-    print(f"Plots   → {plots_dir}\n", flush=True)
 
     data, feature_names = load_lbnl_train_data(args.data_dir)
     n_samples, n_features = data.shape
@@ -356,7 +419,7 @@ def main():
         # ── MUTUAL INFORMATION ───────────────────────────────────────────────
         print(f"  Running Mutual Information Discovery...", flush=True)
         t0 = time.time()
-        d_opt = run_mutual_info(sensor, results_dir, plots_dir, tag, args.max_delay)
+        d_opt = run_mutual_info(sensor, results_dir, plots_mi_dir, tag, args.max_delay)
         t1 = time.time()
         d_all[i] = d_opt
         print(f"  --> d_optimal = {d_opt}  (took {t1 - t0:.2f}s)", flush=True)
@@ -364,7 +427,7 @@ def main():
         # ── FALSE NEAREST NEIGHBORS ─────────────────────────────────────────
         print(f"  Running False Nearest Neighbors (d={d_opt})...", flush=True)
         t2 = time.time()
-        m_opt = run_fnn(sensor, d_opt, results_dir, tag, args.max_rows)
+        m_opt = run_fnn(sensor, d_opt, results_dir, plots_fnn_dir, tag, args.max_rows, args.max_emb_dim, args.no_f_sweep)
         t3 = time.time()
         m_all[i] = m_opt
         print(f"  --> m_optimal = {m_opt}  (took {t3 - t2:.2f}s)\n", flush=True)
