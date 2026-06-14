@@ -3,85 +3,110 @@ Interactive Phase-Space Attractor Animator.
 
 A targeted prototyping GUI built with Streamlit to visually validate optimal 
 time-delay embedding configurations discovered via Mutual Information.
+Now fully integrated with TISEAN's native `delay` C-binary.
 """
 
 import os
+import subprocess
+import json
 import pandas as pd
 import numpy as np
 import streamlit as strl
 import matplotlib.pyplot as plt
 import plotly.graph_objects as go
 from scipy.signal import find_peaks
-import json
 
 # ── 1. ENVIRONMENT & CONFIGURATION ──────────────────────────────────────────
 strl.set_page_config(page_title="Attractor Unfolding Sandbox", layout="wide")
 
-# Path to pristine baseline continuous training data
 DATA_PATH = "/content/drive/MyDrive/CARDD-Tech-Diagnostic-Pipeline/data/LBNL_FDD_Dataset_FCU/FCU_FaultFree.csv"
+SUMMARY_JSON_PATH = "/content/drive/MyDrive/CARDD-Tech-Diagnostic-Pipeline/tisean_results_lbnl/summary.json"
+
+# Define TISEAN executable path
+PROJECT_ROOT = '/content/drive/MyDrive/CARDD-Tech-Diagnostic-Pipeline'
+_TISEAN_DIR = f"{PROJECT_ROOT}/Tisean_3.0.1/source_c"
+DELAY_EXE = os.path.abspath(os.path.join(_TISEAN_DIR, "delay"))
 
 @strl.cache_data
 def load_and_sanitize_data(path: str) -> pd.DataFrame:
-    """Loads LBNL data and strips non-continuous variables to prevent geometric collapse."""
+    """Loads LBNL data and strips non-continuous variables."""
     if not os.path.exists(path):
         alternative_path = os.path.abspath(os.path.join("../../", path))
-        if os.path.exists(alternative_path):
-            path = alternative_path
-        else:
-            raise FileNotFoundError(f"Could not locate LBNL dataset at: {path}")
+        path = alternative_path if os.path.exists(alternative_path) else path
             
     df = pd.read_csv(path)
     
-    # Drop categorical metadata, discrete step actuators, and flat summer loops
-    # INCLUDES THE BINARY AIRFLOW FIX
     cols_to_drop = [
-        "Datetime", "FCU_CTRL", "FAN_CTRL",
-        "RMCLGSPT", "RMHTGSPT",
+        "Datetime", "FCU_CTRL", "FAN_CTRL", "RMCLGSPT", "RMHTGSPT",
         "FCU_CVLV", "FCU_CVLV_DM", "FCU_HVLV", "FCU_HVLV_DM",
-        "FCU_CLG_GPM", "FCU_HTG_GPM",
-        "FCU_DMPR", "FCU_DMPR_DM", "FCU_SPD", "FCU_WAT",
-        "FCU_CLG_EWT", "FCU_CLG_RWT", "FCU_HTG_EWT",
-        "FCU_OA_CFM", "FCU_DA_CFM" 
+        "FCU_CLG_GPM", "FCU_HTG_GPM", "FCU_DMPR", "FCU_DMPR_DM", 
+        "FCU_SPD", "FCU_WAT", "FCU_CLG_EWT", "FCU_CLG_RWT", 
+        "FCU_HTG_EWT", "FCU_OA_CFM", "FCU_DA_CFM" 
     ]
     df = df.drop(columns=[c for c in cols_to_drop if c in df.columns])
     return df.astype(np.float64)
 
-
-# Define path to your TISEAN output summary
-SUMMARY_JSON_PATH = "/content/drive/MyDrive/CARDD-Tech-Diagnostic-Pipeline/tisean_results_lbnl/summary.json"
-
 def get_preset_tau(feature_name: str, json_path: str) -> int:
-    """Reads summary.json to find the automated optimal delay for a feature."""
+    """Reads summary.json to find the automated optimal delay."""
     if os.path.exists(json_path):
         try:
             with open(json_path, 'r') as f:
                 data = json.load(f)
-            
-            # 1. Step into the 'parameters' object first
             params = data.get("parameters", {})
-            
-            # 2. Look for the feature and grab 'd_delay'
             if feature_name in params:
                 return int(params[feature_name].get("d_delay", 50))
         except Exception:
-            pass # Gracefully ignore parsing issues and fall back
+            pass
     return 50
 
-# ── 2. DATA INGESTION ────────────────────────────────────────────────────────
+# ── 2. TISEAN DELAY WRAPPER ─────────────────────────────────────────────────
+
+# The underscore in `_signal` tells Streamlit NOT to hash the massive array, 
+# preventing memory overflow. It caches purely based on feature, tau, and m.
+@strl.cache_data(show_spinner=False)
+def generate_tisean_vectors(_signal: np.ndarray, feature: str, tau: int, m: int) -> np.ndarray:
+    """Executes the TISEAN delay C-binary and retrieves the vector matrix."""
+    if not os.path.isfile(DELAY_EXE):
+        strl.error(f"TISEAN delay binary not found at: {DELAY_EXE}")
+        strl.stop()
+
+    in_file = f"temp_delay_in_{feature}_m{m}_d{tau}.txt"
+    out_file = f"temp_delay_out_{feature}_m{m}_d{tau}.txt"
+    
+    # Write 1D data for TISEAN
+    np.savetxt(in_file, _signal, fmt="%.8f")
+    
+    # Run: delay -m <dim> -d <tau> input.txt -o output.txt
+    subprocess.run(
+        [DELAY_EXE, "-m", str(m), "-d", str(tau), in_file, "-o", out_file],
+        capture_output=True
+    )
+    
+    # Load the resulting matrix
+    if os.path.exists(out_file):
+        matrix = np.loadtxt(out_file)
+    else:
+        matrix = np.zeros((1, m)) # Fallback if binary fails
+        
+    # Cleanup temp files
+    if os.path.exists(in_file): os.remove(in_file)
+    if os.path.exists(out_file): os.remove(out_file)
+        
+    return matrix
+
+
+# ── 3. DATA INGESTION & UI ──────────────────────────────────────────────────
 try:
     df_clean = load_and_sanitize_data(DATA_PATH)
 except Exception as e:
     strl.error(f"Data loading failed: {e}")
     strl.stop()
 
-
-# ── 3. USER INTERFACE LAYOUT ────────────────────────────────────────────────
 strl.title("🔄 Multivariate Phase-Space Unfolding Sandbox")
 
 strl.sidebar.header("Configuration Panel")
 selected_feature = strl.sidebar.selectbox("Target Sensor Stream", options=df_clean.columns)
 
-# Visualization Mode Toggle
 view_mode = strl.sidebar.radio(
     "Select Geometric View",
     ["2D Phase Space", "3D Attractor", "Poincaré Section (Peak Return Map)"]
@@ -90,51 +115,19 @@ view_mode = strl.sidebar.radio(
 strl.sidebar.markdown("---")
 strl.sidebar.subheader("Time Delay Control (tau)")
 
-# Fetch the automated preset baseline from your JSON summary
 preset_tau = get_preset_tau(selected_feature, SUMMARY_JSON_PATH)
-
-# Create a clean, stacked layout for both manual input and sliding
 input_col, slider_col = strl.sidebar.columns([1, 2])
 
 with input_col:
-    # Numeric Entry Box (changes here update the slider)
-    tau_input = strl.number_input(
-        "Value",
-        min_value=1,
-        max_value=1200,
-        value=preset_tau,
-        step=1
-    )
-
+    tau_input = strl.number_input("Value", min_value=1, max_value=1200, value=preset_tau, step=1)
 with slider_col:
-    # Slider (changes here update the numeric box, defaults to the JSON preset)
-    tau_slider = strl.slider(
-        "Slide to Adjust", 
-        min_value=1, 
-        max_value=1200, 
-        value=int(tau_input),
-        step=1,
-        label_visibility="collapsed" # Hides redundant label text for a clean layout
-    )
+    tau_slider = strl.slider("Slide to Adjust", min_value=1, max_value=1200, value=int(tau_input), step=1, label_visibility="collapsed")
 
-# Establish the final active tau value for calculations
 tau = tau_slider
-
-
-# ── 4. GEOMETRIC STATE CALCULATION ──────────────────────────────────────────
 signal = df_clean[selected_feature].values
 
-# 2D Coordinates
-x_coords = signal[tau:]
-y_coords = signal[:-tau]
 
-# 3D Coordinates
-x_3d = signal[2*tau:]
-y_3d = signal[tau:-tau]
-z_3d = signal[:-2*tau]
-
-
-# ── 5. LIVE GRAPH RENDERING ─────────────────────────────────────────────────
+# ── 4. LIVE GRAPH RENDERING ─────────────────────────────────────────────────
 col1, col2 = strl.columns([1, 1.2])
 
 with col1:
@@ -153,10 +146,24 @@ with col1:
 
 with col2:
     if view_mode == "2D Phase Space":
-        strl.subheader("2D Phase Space Canvas")
+        strl.subheader("2D Phase Space Canvas (TISEAN)")
+        
+        # Pull 2D vectors from TISEAN
+        delay_matrix = generate_tisean_vectors(signal, selected_feature, tau, m=2)
+        
+        # --- THE FIX: Sub-sampling the array ---
+        # "::20" means start at the beginning, go to the end, but only take every 20th point.
+        # This breaks the "connected line" illusion by forcing gaps between the dots.
+        STEP = 200 
+        x_coords = delay_matrix[::STEP, 0]
+        y_coords = delay_matrix[::STEP, 1]
+        
         fig_phase, ax_phase = plt.subplots(figsize=(7, 5))
         
-        ax_phase.scatter(x_coords, y_coords, alpha=0.15, s=1.5, color="#e377c2", rasterized=True)
+        # Because we have way fewer points now, we can increase the opacity (alpha) 
+        # and size (s) so the individual dots look crisp and distinct.
+        ax_phase.scatter(x_coords, y_coords, alpha=0.6, s=5.0, color="#e377c2", rasterized=True)
+        
         ax_phase.set_xlabel("Current Value: x(t)", fontsize=10)
         ax_phase.set_ylabel(f"Historical Value: x(t - {tau})", fontsize=10)
         ax_phase.grid(True, linestyle="--", alpha=0.5)
@@ -166,23 +173,25 @@ with col2:
         strl.pyplot(fig_phase)
 
     elif view_mode == "3D Attractor":
-        strl.subheader("3D Phase Space Attractor")
+        strl.subheader("3D Phase Space Attractor (TISEAN)")
         
-        # Prevent browser memory crashes by slicing the first 20,000 points (~14 days)
+        delay_matrix = generate_tisean_vectors(signal, selected_feature, tau, m=3)
+        
+        # Slice it down to 20,000 points, but take every 10th point
         PLOT_LIMIT = 20000
-        x_render = x_3d[:PLOT_LIMIT]
-        y_render = y_3d[:PLOT_LIMIT]
-        z_render = z_3d[:PLOT_LIMIT]
+        STEP_3D = 10
+        x_render = delay_matrix[:PLOT_LIMIT:STEP_3D, 0]
+        y_render = delay_matrix[:PLOT_LIMIT:STEP_3D, 1]
+        z_render = delay_matrix[:PLOT_LIMIT:STEP_3D, 2]
         
-        # Plotly for smooth interactive 3D rendering
         fig_3d = go.Figure(data=[go.Scatter3d(
             x=x_render, y=y_render, z=z_render,
             mode='markers',
             marker=dict(
-                size=1.5,
-                color=z_render,                # Color mapped to Z-axis depth
+                size=2.0,
+                color=z_render, 
                 colorscale='Viridis',   
-                opacity=0.4
+                opacity=0.6
             )
         )])
         
@@ -201,15 +210,14 @@ with col2:
     elif view_mode == "Poincaré Section (Peak Return Map)":
         strl.subheader("Poincaré Section: First Return Map")
         
-        # Find local maxima (peaks) with a minimum distance to filter micro-noise
         peaks, _ = find_peaks(signal, distance=30) 
         peak_values = signal[peaks]
         
-        # P(n) vs P(n+1)
         pn = peak_values[:-1]
         pn_plus_1 = peak_values[1:]
         
         fig_poincare, ax_poincare = plt.subplots(figsize=(7, 5))
+        # Already set as pure scatter
         ax_poincare.scatter(pn, pn_plus_1, alpha=0.5, s=10, color="#2ca02c", edgecolor='black', linewidth=0.5)
         
         ax_poincare.set_xlabel("Peak n", fontsize=10)
