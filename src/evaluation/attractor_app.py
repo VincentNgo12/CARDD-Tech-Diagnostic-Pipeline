@@ -41,7 +41,7 @@ def load_and_sanitize_data(path: str) -> pd.DataFrame:
         "FCU_CLG_GPM", "FCU_HTG_GPM",
         "FCU_DMPR", "FCU_DMPR_DM", "FCU_SPD", "FCU_WAT",
         "FCU_CLG_EWT", "FCU_CLG_RWT", "FCU_HTG_EWT",
-        # "FCU_OA_CFM", "FCU_DA_CFM" 
+        "FCU_OA_CFM", "FCU_DA_CFM" 
     ]
     df = df.drop(columns=[c for c in cols_to_drop if c in df.columns])
     return df.astype(np.float64)

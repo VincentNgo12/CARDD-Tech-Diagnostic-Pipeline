@@ -32,6 +32,7 @@ FNN_EXE = os.path.abspath(os.path.join(_TISEAN_DIR, "false_nearest"))
 DEFAULT_MAX_DELAY = 50
 MAX_EMB_DIM = 20
 DEFAULT_MAX_ROWS = 200_000 # cap rows fed to TISEAN FNN 
+FNN_PLATEAU_DELTA = 0.010  # Delta threshold to determine if the FNN plot plateaued
 
 
 # ── Utility Functions ────────────────────────────────────────────────────────
@@ -100,7 +101,7 @@ def plot_fnn_sweep(
     """
     plt.figure(figsize=(10, 6))
     
-    colors = {2.0: '#e74c3c', 5.0: '#f39c12', 10.0: '#3498db', 15.0: '#2ecc71'}
+    colors = {2.0: '#e74c3c', 3.0: '#f39c12', 4.0: '#3498db', 5.0: '#2ecc71'}
     
     for f_val, fractions in fnn_results.items():
         plt.plot(dims, fractions, marker='o', markersize=4, linewidth=2, 
@@ -241,7 +242,8 @@ def run_fnn(
     tag: str, 
     max_rows: int,
     max_emb_dim: int = MAX_EMB_DIM,
-    no_f_sweep: bool = False
+    no_f_sweep: bool = False,
+    fnn_delta: int = FNN_PLATEAU_DELTA
 ) -> int:
     """
     Run FNN on one sensor with given delay d, return optimal embedding dim m.
@@ -282,7 +284,7 @@ def run_fnn(
             except Exception as e:
                 print(f"  WARNING: Could not parse default output for {tag}: {e}")
     else:
-        f_sweep = [2.0, 3.0, 4.0, 5.0, 10.0]
+        f_sweep = [1.5, 2.0, 3.0, 4.0, 5.0, 10.0]
         for f_val in f_sweep:
             fnn_out = os.path.join(results_dir, f"{tag}_fnn_f{f_val}.txt")
             
@@ -310,15 +312,15 @@ def run_fnn(
 
     # ── 2. AUTOMATED ELBOW DETECTION ──
     # If sweeping, use f=2.0 as baseline. If default, just use the only curve we have.
-    target_curve = fnn_results.get(2.0, list(fnn_results.values())[-1])
+    target_curve = fnn_results.get(3.0, list(fnn_results.values())[-1])
     m_opt = int(dims[-1])
     
     for i in range(1, len(target_curve)):
         delta = target_curve[i-1] - target_curve[i]
-        if delta < 0.015:
+        if delta < fnn_delta:
             if i + 1 < len(target_curve):
                 next_delta = target_curve[i] - target_curve[i+1]
-                if next_delta < 0.015:
+                if next_delta < fnn_delta:
                     m_opt = int(dims[i-1])
                     print(f"  [AUTO] Invariant elbow locked at m={m_opt}")
                     break
@@ -344,6 +346,8 @@ def parse_args():
                    help=f"Override default row limit (default: {DEFAULT_MAX_ROWS})")
     p.add_argument("--max-delay", type=int, default=DEFAULT_MAX_DELAY,
                    help=f"Override Mutual Information search window (default: {DEFAULT_MAX_DELAY})")
+    p.add_argument("--fnn-delta", type=float, default=FNN_PLATEAU_DELTA,
+                    help=f"Delta threshold to determine if the FNN plot plateaued (default: {FNN_PLATEAU_DELTA})")
     p.add_argument("--max-emb-dim", type=int, default=10,
                    help="Maximum embedding dimension to search (default: 10)")
     p.add_argument("--no-f-sweep", action="store_true",
@@ -427,7 +431,7 @@ def main():
         # ── FALSE NEAREST NEIGHBORS ─────────────────────────────────────────
         print(f"  Running False Nearest Neighbors (d={d_opt})...", flush=True)
         t2 = time.time()
-        m_opt = run_fnn(sensor, d_opt, results_dir, plots_fnn_dir, tag, args.max_rows, args.max_emb_dim, args.no_f_sweep)
+        m_opt = run_fnn(sensor, d_opt, results_dir, plots_fnn_dir, tag, args.max_rows, args.max_emb_dim, args.no_f_sweep, args.fnn_delta)
         t3 = time.time()
         m_all[i] = m_opt
         print(f"  --> m_optimal = {m_opt}  (took {t3 - t2:.2f}s)\n", flush=True)
