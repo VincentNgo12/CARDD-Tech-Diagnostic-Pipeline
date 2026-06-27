@@ -1,152 +1,49 @@
-"""
-LBNL HVAC Fault Detection Data Loader.
-
-This module provides a specialized implementation of the BaseDataLoader 
-for the LBNL (Lawrence Berkeley National Laboratory) HVAC dataset. 
-It handles continuous sensor streams and prepares them for 
-Multivariate Phase-Space Reconstruction.
-
-Architecture Path Mapping:
-- Input: Raw CSV/JSON from LBNL continuous sensor streams (data/raw/lbnl/)
-- Output: Standardized NumPy arrays or PyTorch Tensors for delay embedding.
-"""
-
-import os
-import torch
+import json
 import numpy as np
 import pandas as pd
-from typing import Tuple, Optional
-from src.ingestion.base_loader import BaseDataLoader
+import os
 
+def load_tisean_params(json_path):
+    """Loads the optimal delay (d) and dimension (m) parameters."""
+    with open(json_path, 'r') as f:
+        config = json.load(f)
+    return config["parameters"]
 
-class LBNLLoader(BaseDataLoader):
+def get_max_history(params_dict):
+    """Calculates the absolute longest lookback window needed for alignment."""
+    return max((s["m_dimension"] - 1) * s["d_delay"] for s in params_dict.values())
+
+def build_trajectory_matrix(csv_path, params_dict, max_history, step=1):
     """
-    Data loader for the LBNL continuous sensor stream dataset.
-
-    This class implements the ingestion logic for HVAC fault detection data,
-    providing methods to load, clean, and format data for both classical 
-    machine learning and deep learning models.
-
-    Attributes:
-        data_path (str): Path to the LBNL data directory or file.
-        df (Optional[pd.DataFrame]): Internal storage for the loaded DataFrame.
+    Ingests a CSV and transforms the continuous time-series columns into 
+    a single synchronized, delay-embedded phase-space matrix.
     """
-
-    def __init__(self, data_path: str, label: int) -> None:
-        """
-        Initializes the LBNL loader.
-
-        Args:
-            data_path: Path to the LBNL dataset.
-            label: Integer class label (e.g., 0 for Healthy, 1 for Faulty).
-        """
-        super().__init__(data_path)
-        self.df: Optional[pd.DataFrame] = None
-        self.label = label
-
-    def load_and_clean(self) -> None:
-        """
-        Loads raw LBNL data and performs domain-specific cleaning.
-
-        This method replicates the extraction logic from Andy's TISEAN wrapper,
-        stripping non-numeric and discrete actuator columns to align with 
-        the expected feature list.
-        """
-        if not os.path.exists(self.data_path):
-            raise FileNotFoundError(f"LBNL data not found at: {self.data_path}")
-        
-        # Load the CSV file
-        self.df = pd.read_csv(self.data_path)
-        
-        # Aggressively strip non-numeric and discrete actuator columns
-        cols_to_drop = ["Datetime", "FCU_CTRL", "FAN_CTRL"]
-        self.df = self.df.drop(columns=[c for c in cols_to_drop if c in self.df.columns])
-        
-        # Ensure data is numeric
-        self.df = self.df.astype(np.float64)
-        
-        print(f"DEBUG: Loaded and cleaned LBNL data from {self.data_path}. "
-              f"Remaining features: {len(self.df.columns)}")
-
-    def get_numpy(self, summary_json_path: str) -> Tuple[np.ndarray, np.ndarray]:
-        """
-        Constructs the multivariate phase-space embedding matrix.
-
-        Args:
-            summary_json_path: Path to the TISEAN parameter discovery output (summary.json).
-
-        Returns:
-            A tuple (X, y) where X is the constructed 2D NumPy embedding matrix 
-            and y is a 1D NumPy array of identical length filled with self.label.
-        """
-        if self.df is None:
-            raise ValueError("Data not loaded. Call load_and_clean() first.")
-        
-        import json
-        with open(summary_json_path, "r") as f:
-            summary = json.load(f)
-        
-        # Extract discovered optimal delay (d) and embedding dimension (m)
-        param_map = summary["parameters"]
-        
-        # 1. Parse parameters and calculate lookbacks dynamically using dataframe column names
-        lookbacks = []
-        m_dimensions = []
-        d_delays = []
-        
-        for col in self.df.columns:
-            if col not in param_map:
-                raise KeyError(f"Feature '{col}' found in data loader but missing from summary.json configuration.")
+    df = pd.read_csv(csv_path)
+    N_total = len(df) - max_history
+    embedded_features = []
+    
+    for feature, settings in params_dict.items():
+        # Safety check: ensure the sensor actually exists in this specific fault file
+        if feature not in df.columns:
+            raise ValueError(f"CRITICAL: Missing sensor '{feature}' in {os.path.basename(csv_path)}")
             
-            d = param_map[col]["d_delay"]
-            m = param_map[col]["m_dimension"]
+        signal = df[feature].values
+        d = settings["d_delay"]
+        m = settings["m_dimension"]
+        
+        feature_matrix = np.zeros((N_total, m))
+        
+        # Fast memory-level slicing (Vectorized)
+        for i in range(m):
+            lag = i * d
+            start_idx = max_history - lag
+            end_idx = len(signal) - lag
+            feature_matrix[:, i] = signal[start_idx:end_idx]
             
-            d_delays.append(d)
-            m_dimensions.append(m)
-            lookbacks.append((m - 1) * d)
-            
-        max_lookback = int(max(lookbacks))
-        
-        data = self.df.values
-        N, num_features = data.shape
-        
-        num_samples = N - max_lookback
-        total_cols = sum(m_dimensions)
-        
-        # Pre-allocate feature frame
-        X = np.zeros((num_samples, total_cols), dtype=np.float64)
-        
-        # 2. Reconstruct multivariate phase-space safely mapped by feature name
-        col_offset = 0
-        for i, col in enumerate(self.df.columns):
-            m = m_dimensions[i]
-            d = d_delays[i]
-            
-            # For each index t from max_lookback to N, horizontally stack 
-            # the history vectors: [x_i(t), x_i(t - d_i), x_i(t - 2*d_i), ...]
-            for j in range(m):
-                lag = j * d
-                # Extract the history vector across the entire valid range
-                X[:, col_offset] = data[max_lookback - lag : N - lag, i]
-                col_offset += 1
-                
-        # y is a 1D array filled entirely with self.label
-        y = np.full((num_samples,), self.label, dtype=np.int64)
-        
-        return X, y
+        embedded_features.append(feature_matrix)
 
-    def get_tensors(self, summary_json_path: str, device: str = "cpu") -> Tuple[torch.Tensor, torch.Tensor]:
-        """
-        Converts the processed LBNL data into PyTorch Tensors.
-
-        Args:
-            summary_json_path: Path to the TISEAN summary.json.
-            device: Target device for tensors (e.g., 'cpu', 'cuda').
-
-        Returns:
-            A tuple (X_tensor, y_tensor) on the specified device.
-        """
-        X_np, y_np = self.get_numpy(summary_json_path)
-        X_tensor = torch.tensor(X_np, dtype=torch.float32).to(device)
-        y_tensor = torch.tensor(y_np, dtype=torch.long).to(device)
-        return X_tensor, y_tensor
+    # Horizontally stack all feature matrices (e.g., 11 sensors * 5 dims = 54 columns)
+    full_matrix = np.hstack(embedded_features)
+    
+    # Apply STSP Decimation (Theiler Step)
+    return full_matrix[::step]
